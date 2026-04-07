@@ -1,0 +1,23 @@
+name: Regista Engine Automation
+on:
+  schedule:
+    - cron: '0 9 * * 5' # Her Cuma 09:00 UTC (Maç bülteninden hemen önce)
+  workflow_dispatch: # İstediğin zaman manuel çalıştırmanı sağlar
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run
+        env:
+          SB_URL: ${{ secrets.SB_URL }}
+          SB_KEY: ${{ secrets.SB_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python main.py
