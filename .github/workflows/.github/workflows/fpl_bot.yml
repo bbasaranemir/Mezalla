@@ -1,8 +1,9 @@
 name: Regista Engine Automation
 on:
   schedule:
-    - cron: '0 9 * * 5' # Her Cuma 09:00 UTC (Maç bülteninden hemen önce)
-  workflow_dispatch: # İstediğin zaman manuel çalıştırmanı sağlar
+    # Perşembe, Cuma ve Cumartesi günleri saat 09:00'da çalışır
+    - cron: '0 9 * * 4,5,6' 
+  workflow_dispatch: # Manuel tetikleme her zaman açık kalsın
 
 jobs:
   run-bot:
