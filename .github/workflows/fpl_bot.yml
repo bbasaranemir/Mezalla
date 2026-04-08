@@ -1,8 +1,9 @@
-name: Regista Engine Automation
+name: Mezalla Engine Automation
 on:
   schedule:
-    - cron: '0 9 * * *' # Her gün saat 09:00 UTC'de uyanır
-  workflow_dispatch: # Manuel tetikleme her zaman açık kalsın
+    - cron: '0 9 * * *' 
+  workflow_dispatch:
+# ... (Geri kalan kısımlar aynı)
 
 jobs:
   run-bot:
