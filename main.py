@@ -40,7 +40,6 @@ class MezallaEngine:
             print("HATA: ODDS_API_KEY bulunamadi.")
             return {}
 
-        # URL DÜZELTİLDİ: soccer_epl kullanilmalidir.
         url = "https://odds.p.rapidapi.com/v4/sports/soccer_epl/odds"
         
         headers = {
@@ -49,7 +48,7 @@ class MezallaEngine:
         }
         
         params = {
-            'regions': 'eu,uk,us',
+            'regions': 'eu,us',
             'markets': 'player_anytime_goalscorer',
             'oddsFormat': 'decimal'
         }
@@ -142,7 +141,7 @@ class MezallaEngine:
     def run_forecast_cycle(self):
         market_odds = self.fetch_market_odds()
         if not market_odds:
-            print("Analiz yapilacak piyasa verisi bulunamadi. Ucretsiz plan golcu marketini desteklemiyor veya veri bos olabilir.")
+            print("Piyasa verisi bulunamadi. API limitlerini veya yetkilerini kontrol et.")
             return
 
         latest = self.df.groupby('player_id').tail(1).copy()
