@@ -2,7 +2,6 @@ import os
 import requests
 import pandas as pd
 import numpy as np
-import time
 from datetime import datetime
 from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
@@ -23,11 +22,12 @@ class MezallaEnterprise:
         }
         
         self.bankroll = 585.60
-        self.features = ['team_strength', 'avg_xg', 'avg_threat', 'difficulty_index']
+        # ML Özellikleri: Eksik 'difficulty' yerine 'team_strength' entegre edildi
+        self.features = ['team_strength', 'avg_xg', 'avg_threat']
         self.model = None
 
     def fetch_fpl_data(self):
-        """Hata Giderildi: Player ve Team verileri dogru sekilde birlestirildi."""
+        """FPL verilerini toplar ve temizler."""
         print(f"[{datetime.now().strftime('%H:%M')}] FPL verileri toplaniyor...")
         r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
         
@@ -35,22 +35,22 @@ class MezallaEnterprise:
         df_teams = pd.DataFrame(r['teams'])[['id', 'name', 'strength']]
         df_teams.columns = ['team_id', 'team_name', 'team_strength']
         
-        # Oyuncu bazli xG ve Threat metriklerini takim seviyesine indirge
+        # Oyuncu verilerini takim bazli ortalamaya indirge
+        # 'difficulty' sütunu burada yoktu, kaldirildi.
         team_agg = df_players.groupby('team').agg({
             'expected_goals': 'mean',
-            'threat': 'mean',
-            'difficulty': 'mean'
+            'threat': 'mean'
         }).reset_index()
-        team_agg.columns = ['team_id', 'avg_xg', 'avg_threat', 'difficulty_index']
+        team_agg.columns = ['team_id', 'avg_xg', 'avg_threat']
         
-        # Takim gucu (strength) ile birlestir
-        full_stats = pd.merge(team_agg, df_teams, on='team_id')
-        return full_stats
+        # Takim güçleri ile birleştir
+        return pd.merge(team_agg, df_teams, on='team_id')
 
     def train_ml_model(self, stats):
-        print(f"[{datetime.now().strftime('%H:%M')}] ML Modeli egitiliyor...")
+        """Hibrit ML modelini egitir."""
+        print(f"[{datetime.now().strftime('%H:%M')}] Model egitiliyor...")
         X = stats[self.features]
-        # Hedef: Kendi ortalamasinin uzerinde xG ureten "formda" takimlari bulmak
+        # Sentetik hedef: Ortalamanin uzerinde xG üreten takimlari 'formda' kabul et
         y = (X['avg_xg'] > X['avg_xg'].median()).astype(int)
         
         ensemble = VotingClassifier(estimators=[
@@ -61,15 +61,16 @@ class MezallaEnterprise:
         self.model = CalibratedClassifierCV(ensemble, cv=3)
         self.model.fit(X, y)
 
-    def log_to_supabase(self, table, data):
-        """Profesyonel DB loglama."""
+    def log_prediction(self, data):
+        """Tahmini Supabase'e kaydeder."""
         try:
-            url = f"{self.sb_url}/rest/v1/{table}"
+            url = f"{self.sb_url}/rest/v1/predictions"
             requests.post(url, headers=self.headers, json=data, timeout=10)
         except Exception as e:
-            print(f"DB Log Hatasi ({table}): {e}")
+            print(f"DB Log Hatasi: {e}")
 
     def fetch_odds(self):
+        """H2H oranlarini çeker."""
         url = "https://odds.p.rapidapi.com/v4/sports/soccer_epl/odds"
         headers = {"X-RapidAPI-Key": self.rapid_api_key, "X-RapidAPI-Host": "odds.p.rapidapi.com"}
         params = {'regions': 'eu', 'markets': 'h2h', 'oddsFormat': 'decimal'}
@@ -81,15 +82,12 @@ class MezallaEnterprise:
         self.train_ml_model(stats)
         market_data = self.fetch_odds()
         
-        if not market_data:
-            print("Piyasa verisi çekilemedi.")
-            return
+        if not market_data: return
 
         for match in market_data:
-            home_team_name = match['home_team']
-            # Basit string esleme (Gelistirilebilir)
-            team_row = stats[stats['team_name'].str.contains(home_team_name[:5], case=False)]
-            
+            home_team = match['home_team']
+            # Takim verisini çek
+            team_row = stats[stats['team_name'].str.contains(home_team[:5], case=False)]
             if team_row.empty: continue
             
             # ML Tahmini
@@ -100,36 +98,38 @@ class MezallaEnterprise:
             for bookie in match['bookmakers']:
                 for market in bookie['markets']:
                     for outcome in market['outcomes']:
-                        if outcome['name'] == home_team_name:
+                        if outcome['name'] == home_team:
                             best_odds = max(best_odds, outcome['price'])
 
             ev = (prob_home * best_odds) - 1
             
-            if ev > 0.03: # %3 ve uzeri avantaj yakalandiysa
+            # Sinyal Filtresi
+            if ev > 0.05 and prob_home > 0.35:
                 bet = np.round(self.bankroll * 0.02, 2)
                 
-                prediction_entry = {
-                    "model_version": "V5.1-HYBRID",
-                    "home_avg_xg": float(team_row['avg_xg'].iloc[0]),
+                # SQL Kayit Hazirligi
+                log_data = {
+                    "team_name": home_team,
+                    "home_strength": int(team_row['team_strength'].iloc[0]),
+                    "avg_xg_snapshot": float(team_row['avg_xg'].iloc[0]),
+                    "avg_threat_snapshot": float(team_row['avg_threat'].iloc[0]),
                     "prob_home": float(prob_home),
-                    "prediction_result": "HOME"
+                    "ev_value": float(ev)
                 }
                 
-                # Otonom Sinyal
-                self.log_to_supabase("predictions", prediction_entry)
-                self.send_telegram(home_team_name, prob_home, best_odds, ev, bet)
+                self.log_prediction(log_data)
+                self.send_telegram(home_team, prob_home, best_odds, ev, bet)
 
     def send_telegram(self, team, prob, odds, ev, bet):
-        msg = (f"🤖 *Mezalla Enterprise v5.1*\n\n"
+        msg = (f"📈 *Mezalla ML Enterprise*\n\n"
                f"⚽ Takim: {team}\n"
-               f"📊 ML Olasilik: %{prob*100:.1f}\n"
-               f"💰 En Iyi Oran: {odds:.2f}\n"
-               f"📈 EV: %{ev*100:.1f}\n"
-               f"💵 Onerilen: {bet} TL")
-        url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
-        requests.post(url, json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "Markdown"})
+               f"🎯 ML Olasilik: %{prob*100:.1f}\n"
+               f"💰 Oran: {odds:.2f}\n"
+               f"📈 Değer (EV): %{ev*100:.1f}\n"
+               f"💵 Bahis: {bet} TL")
+        requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
+                      json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
     engine = MezallaEnterprise()
     engine.run_engine()
-    
