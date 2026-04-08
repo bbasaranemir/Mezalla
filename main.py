@@ -23,46 +23,29 @@ class MezallaEnterprise:
         self.bankroll = 585.60
         self.features = ['team_strength', 'avg_xg', 'avg_threat']
 
-    def audit_past_predictions(self):
-        """PENDING tahminleri kontrol eder ve gercek sonuclarla kapatir."""
-        print(f"[{datetime.now().strftime('%H:%M')}] Denetim dongusu baslatildi...")
-        url = f"{self.sb_url}/rest/v1/predictions?actual_result=eq.PENDING"
-        try:
-            pending = requests.get(url, headers=self.headers, timeout=10).json()
-            if not pending: 
-                print("Bekleyen PENDING tahmini bulunamadi.")
-                return
+    def fetch_current_fixtures(self):
+        """Gelecek maçları ve rakipleri eşleştirir."""
+        print(f"[{datetime.now().strftime('%H:%M')}] Fikstür haritası oluşturuluyor...")
+        f_data = requests.get("https://fantasy.premierleague.com/api/fixtures/?future=1").json()
+        static = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
+        team_map = {t['id']: t['name'] for t in static['teams']}
+        
+        fixture_map = {}
+        for f in f_data:
+            home = team_map[f['team_h']]
+            away = team_map[f['team_a']]
+            # Her iki takım için de bu maçın bilgisini tut
+            fixture_map[home] = {"fixture_id": f['id'], "opponent": away, "is_home": True}
+            fixture_map[away] = {"fixture_id": f['id'], "opponent": home, "is_home": False}
+        return fixture_map
 
-            fixtures = requests.get("https://fantasy.premierleague.com/api/fixtures/").json()
-            static = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
-            team_map = {t['id']: t['name'] for t in static['teams']}
-            
-            results = {}
-            for f in fixtures:
-                if f['finished']:
-                    h_name = team_map[f['team_h']]
-                    res = "HOME_WIN" if f['team_h_score'] > f['team_a_score'] else ("AWAY_WIN" if f['team_h_score'] < f['team_a_score'] else "DRAW")
-                    results[h_name] = res
-
-            for p in pending:
-                p_id, team = p['id'], p['team_name']
-                odds, bet = float(p.get('placed_odds', 1.0)), float(p.get('bet_amount', 0.0))
-                
-                actual, pl = "LOSS", -bet
-                for h_team, res in results.items():
-                    if team in h_team:
-                        if res == "HOME_WIN": actual, pl = "WIN", round((bet * odds) - bet, 2)
-                        elif res == "DRAW": actual, pl = "DRAW", 0
-                        break
-                
-                requests.patch(f"{self.sb_url}/rest/v1/predictions?id=eq.{p_id}", headers=self.headers, json={"actual_result": actual, "profit_loss": pl})
-                print(f"✅ Audit: {team} -> {actual} (P/L: {pl})")
-        except Exception as e:
-            print(f"Audit Hatasi: {e}")
+    def check_existing_prediction(self, fixture_id, team_name):
+        """Aynı maç ve takım için kayıt var mı kontrol eder."""
+        url = f"{self.sb_url}/rest/v1/predictions?fixture_id=eq.{fixture_id}&team_name=eq.{team_name}"
+        res = requests.get(url, headers=self.headers).json()
+        return len(res) > 0
 
     def fetch_fpl_data(self):
-        """FPL verilerini temizler ve hazirlar."""
-        print(f"[{datetime.now().strftime('%H:%M')}] Veri isleme basladi...")
         r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
         df_players = pd.DataFrame(r['elements'])
         df_teams = pd.DataFrame(r['teams'])[['id', 'name', 'strength']]
@@ -76,17 +59,13 @@ class MezallaEnterprise:
         return pd.merge(team_agg, df_teams, on='team_id')
 
     def run_prediction_cycle(self, stats):
-        """ML modelini egitir ve yeni tahminleri uretir."""
-        print(f"[{datetime.now().strftime('%H:%M')}] Tahmin dongusu baslatildi...")
+        print(f"[{datetime.now().strftime('%H:%M')}] Tahmin döngüsü başladı...")
+        f_map = self.fetch_current_fixtures()
+        
+        # ML Model Eğitimi (Statik Veriyle)
         X = stats[self.features]
         y = (X['avg_xg'] > X['avg_xg'].median()).astype(int)
-        
-        ensemble = VotingClassifier(estimators=[
-            ('xgb', XGBClassifier(n_estimators=100, max_depth=4)),
-            ('rf', RandomForestClassifier(n_estimators=100))
-        ], voting='soft')
-        
-        model = CalibratedClassifierCV(ensemble, cv=3).fit(X, y)
+        model = CalibratedClassifierCV(VotingClassifier(estimators=[('xgb', XGBClassifier(n_estimators=100)), ('rf', RandomForestClassifier())], voting='soft'), cv=3).fit(X, y)
 
         url = "https://odds.p.rapidapi.com/v4/sports/soccer_epl/odds"
         headers = {"X-RapidAPI-Key": self.rapid_api_key, "X-RapidAPI-Host": "odds.p.rapidapi.com"}
@@ -94,6 +73,15 @@ class MezallaEnterprise:
 
         for match in market_data:
             home_team = match['home_team']
+            team_info = f_map.get(home_team)
+            
+            if not team_info: continue
+            
+            # Mükerrer Kayıt Kontrolü
+            if self.check_existing_prediction(team_info['fixture_id'], home_team):
+                print(f"⏩ Atlanıyor: {home_team} (Zaten kayıtlı)")
+                continue
+
             team_row = stats[stats['team_name'].str.contains(home_team[:5], case=False)]
             if team_row.empty: continue
             
@@ -104,24 +92,23 @@ class MezallaEnterprise:
             if ev > 0.05:
                 bet = round(self.bankroll * 0.02, 2)
                 payload = {
+                    "fixture_id": team_info['fixture_id'],
                     "team_name": home_team, 
-                    "model_version": "V5.6.1-FIX", 
-                    "home_strength": int(team_row['team_strength'].iloc[0]), 
-                    "avg_xg_snapshot": float(team_row['avg_xg'].iloc[0]), 
-                    "avg_threat_snapshot": float(team_row['avg_threat'].iloc[0]), 
+                    "model_version": "V5.7-PRO", 
                     "prob_home": float(prob), 
                     "ev_value": float(ev), 
                     "placed_odds": float(best_odds), 
-                    "bet_amount": float(bet)
+                    "bet_amount": float(bet),
+                    "avg_xg_snapshot": float(team_row['avg_xg'].iloc[0])
                 }
                 requests.post(f"{self.sb_url}/rest/v1/predictions", headers=self.headers, json=payload)
-                self.send_telegram(home_team, prob, best_odds, ev, bet)
+                self.send_telegram(home_team, team_info['opponent'], prob, best_odds, ev, bet)
 
-    def send_telegram(self, team, prob, odds, ev, bet):
-        """Hata giderildi: f-string ifadesi tamalandi."""
-        msg = (f"🛡️ *Mezalla Enterprise v5.6.1*\n\n"
-               f"⚽ Takım: {team}\n"
-               f"🎯 ML Olasılık: %{prob*100:.1f}\n"
+    def send_telegram(self, team, opponent, prob, odds, ev, bet):
+        msg = (f"🛡️ *Mezalla Enterprise v5.7*\n\n"
+               f"🏟️ Maç: *{team} vs {opponent}*\n"
+               f"🎯 Tahmin: {team}\n"
+               f"📊 Olasılık: %{prob*100:.1f}\n"
                f"💰 Oran: {odds:.2f}\n"
                f"📈 EV: %{ev*100:.1f}\n"
                f"💵 Bahis: {bet} TL")
@@ -130,9 +117,5 @@ class MezallaEnterprise:
 
 if __name__ == "__main__":
     engine = MezallaEnterprise()
-    # 1. Once eski sonuclari denetle ve PENDING kayitlari kapat
-    engine.audit_past_predictions()
-    # 2. Guncel veriyi cek ve temizle
     stats = engine.fetch_fpl_data()
-    # 3. Tahmin yap ve yeni kayitlari ac
     engine.run_prediction_cycle(stats)
