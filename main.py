@@ -10,11 +10,12 @@ from sklearn.calibration import CalibratedClassifierCV
 
 class MezallaEngine:
     def __init__(self):
+        # GitHub Secrets - Bosluklari temizleyen .strip() eklendi
         self.sb_url = os.getenv('SB_URL', "").strip().rstrip("/")
-        self.sb_key = os.getenv('SB_KEY', "")
-        self.tg_token = os.getenv('TG_TOKEN', "")
-        self.tg_chat_id = os.getenv('TG_CHAT_ID', "")
-        self.rapid_api_key = os.getenv('ODDS_API_KEY', "")
+        self.sb_key = os.getenv('SB_KEY', "").strip()
+        self.tg_token = os.getenv('TG_TOKEN', "").strip()
+        self.tg_chat_id = os.getenv('TG_CHAT_ID', "").strip()
+        self.rapid_api_key = os.getenv('ODDS_API_KEY', "").strip()
         
         self.sb_headers = {
             "apikey": self.sb_key,
@@ -27,23 +28,24 @@ class MezallaEngine:
         self.next_kickoff = None
         self.model = None
         self.df = None
-        self.features = ['rolling_xG', 'rolling_threat', 'position', 'next_difficulty', 'next_is_home', 'opp_leakage', 'fatigue_index', 'is_specialist', 'opp_defensive_form', 'avg_mins']
+        self.features = [
+            'rolling_xG', 'rolling_threat', 'position', 
+            'next_difficulty', 'next_is_home', 'opp_leakage', 
+            'fatigue_index', 'is_specialist', 'opp_defensive_form', 'avg_mins'
+        ]
 
     def fetch_market_odds(self):
-        """RapidAPI üzerinden canli oranlari çeker."""
-        print(f"[{datetime.now().strftime('%H:%M')}] RapidAPI üzerinden oranlar çekiliyor...")
+        """RapidAPI uzerinden piyasa oranlarini otonom ceker."""
+        print(f"[{datetime.now().strftime('%H:%M')}] RapidAPI uzerinden oranlar cekiliyor...")
         if not self.rapid_api_key:
-            print("Hata: ODDS_API_KEY bulunamadi.")
+            print("Kritik Hata: ODDS_API_KEY bulunamadi.")
             return {}
             
         url = "https://the-odds-api.p.rapidapi.com/v4/sports/soccer_england_premier_league/odds/"
-        
-        # RapidAPI Özel Başliklari
         headers = {
             "X-RapidAPI-Key": self.rapid_api_key,
             "X-RapidAPI-Host": "the-odds-api.p.rapidapi.com"
         }
-        
         params = {
             'regions': 'eu',
             'markets': 'player_anytime_goalscorer',
@@ -52,33 +54,35 @@ class MezallaEngine:
         
         try:
             response = requests.get(url, headers=headers, params=params, timeout=15)
-            data = response.json()
-            
             if response.status_code != 200:
-                print(f"API Hatasi: {data.get('message', 'Bilinmeyen hata')}")
+                print(f"API Hatasi ({response.status_code}): {response.text}")
                 return {}
-
+                
+            data = response.json()
             market_map = {}
             for match in data:
                 for bookie in match.get('bookmakers', []):
-                    # Pinnacle ve Betfair en rasyonel piyasa yapicilardir
-                    if bookie['key'] in ['pinnacle', 'betfair_ex_back', 'williamhill']:
+                    if bookie['key'] in ['pinnacle', 'betfair_ex_back', 'williamhill', 'betfair_ex_lay']:
                         for market in bookie.get('markets', []):
                             if market['key'] == 'player_anytime_goalscorer':
                                 for outcome in market['outcomes']:
-                                    # Veri kirliliğini önlemek için en yüksek orani baz al
-                                    current_price = market_map.get(outcome['name'], 0)
-                                    if outcome['price'] > current_price:
+                                    # En yuksek orani (en avantajli fiyati) kaydet
+                                    current_max = market_map.get(outcome['name'], 0)
+                                    if outcome['price'] > current_max:
                                         market_map[outcome['name']] = outcome['price']
             return market_map
         except Exception as e:
-            print(f"RapidAPI Bağlanti Hatasi: {e}")
+            print(f"RapidAPI Baglanti Hatasi: {e}")
             return {}
 
     def send_notification(self, message):
+        """Mezalla Raporunu iletir."""
         if not self.tg_token or not self.tg_chat_id: return
-        requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
-                      json={"chat_id": self.tg_chat_id, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
+        try:
+            requests.post(url, json={"chat_id": self.tg_chat_id, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        except Exception as e:
+            print(f"Telegram Hatasi: {e}")
 
     def fetch_and_process(self, limit=400):
         print(f"[{datetime.now().strftime('%H:%M')}] FPL verileri toplaniyor...")
@@ -108,7 +112,8 @@ class MezallaEngine:
             
             self.df = pd.DataFrame(all_match_data).sort_values(['player_id', 'round'])
             self._feature_engine()
-        except Exception as e: print(f"Hata: {e}")
+        except Exception as e:
+            print(f"Veri Isleme Hatasi: {e}")
 
     def _feature_engine(self):
         df = self.df
@@ -125,6 +130,7 @@ class MezallaEngine:
         self.df = df.dropna(subset=['target', 'next_difficulty'])
 
     def train_ensemble(self):
+        print(f"[{datetime.now().strftime('%H:%M')}] Model egitiliyor...")
         X, y = self.df[self.features], self.df['target']
         ensemble = VotingClassifier(estimators=[
             ('xgb', XGBClassifier(n_estimators=100, learning_rate=0.05, max_depth=4, eval_metric='logloss')),
@@ -136,14 +142,13 @@ class MezallaEngine:
     def run_forecast_cycle(self):
         market_odds = self.fetch_market_odds()
         if not market_odds:
-            self.send_notification("⚠️ Piyasa verisi alinamadi. RapidAPI limitini veya anahtarini kontrol et.")
+            print("Piyasa verisi bos dondu. Islem durduruldu.")
             return
 
         latest = self.df.groupby('player_id').tail(1).copy()
         latest['raw_prob'] = self.model.predict_proba(latest[self.features])[:, 1]
         latest['final_prob'] = latest['raw_prob'] * (0.8 + 0.2 * (latest['avg_mins']/90))
         
-        # Isim eslestirme ve filtreleme
         latest['real_odds'] = latest['player_name'].map(market_odds)
         latest = latest.dropna(subset=['real_odds'])
         
@@ -164,10 +169,10 @@ class MezallaEngine:
                     "status": "AUTO", "created_at": datetime.now().isoformat()
                 }
                 requests.post(f"{self.sb_url}/rest/v1/signals", headers=upsert_headers, json=payload, timeout=5)
-                msg += f"👤 *{row['player_name']}*\n🎯 Olasilik: %{row['final_prob']*100:.1f}\n📈 EV: {row['ev']:.2f}\n💰 Oran: {row['real_odds']:.2f}\n\n"
+                msg += f"👤 *{row['player_name']}*\n🎯 Olasilik: %{row['final_prob']*100:.1f}\n📈 EV: {row['ev']:.2f}\n💰 Oran: {row['real_odds']:.2f}\n💵 Bahis: {row['bet_amount']} TL\n\n"
             self.send_notification(msg)
         else:
-            print("Kriterlere uygun sinyal bulunamadi.")
+            print("Kriterlere uygun firsat bulunamadi.")
 
 if __name__ == "__main__":
     engine = MezallaEngine()
