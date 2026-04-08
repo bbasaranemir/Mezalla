@@ -26,11 +26,18 @@ class MezallaEnterprise:
         self.model = None
 
     def fetch_fpl_data(self):
-        """FPL verilerini toplar ve ML oznitelikleri olusturur."""
+        """FPL verilerini toplar ve string-sayi donusumlerini yapar."""
+        print(f"[{datetime.now().strftime('%H:%M')}] FPL verileri temizleniyor...")
         r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
+        
         df_players = pd.DataFrame(r['elements'])
         df_teams = pd.DataFrame(r['teams'])[['id', 'name', 'strength']]
         df_teams.columns = ['team_id', 'team_name', 'team_strength']
+        
+        # KRITIK HATA COZUMU: Metin olarak gelen verileri sayiya ceviriyoruz
+        cols_to_fix = ['expected_goals', 'threat']
+        for col in cols_to_fix:
+            df_players[col] = pd.to_numeric(df_players[col], errors='coerce').fillna(0)
         
         team_agg = df_players.groupby('team').agg({
             'expected_goals': 'mean',
@@ -41,7 +48,7 @@ class MezallaEnterprise:
         return pd.merge(team_agg, df_teams, on='team_id')
 
     def train_ml_model(self, stats):
-        """XGBoost ve RF tabanli hibrit model."""
+        print(f"[{datetime.now().strftime('%H:%M')}] Hibrit ML modeli egitiliyor...")
         X = stats[self.features]
         y = (X['avg_xg'] > X['avg_xg'].median()).astype(int)
         
@@ -54,7 +61,6 @@ class MezallaEnterprise:
         self.model.fit(X, y)
 
     def log_prediction(self, data):
-        """Veritabanina tahmin kaydi atar."""
         try:
             url = f"{self.sb_url}/rest/v1/predictions"
             requests.post(url, headers=self.headers, json=data, timeout=10)
@@ -69,7 +75,7 @@ class MezallaEnterprise:
         return res.json() if res.status_code == 200 else []
 
     def run_engine(self):
-        print(f"[{datetime.now().strftime('%H:%M')}] Mezalla Dongusu Basladi...")
+        print(f"[{datetime.now().strftime('%H:%M')}] Mezalla Otonom Dongu Basladi...")
         stats = self.fetch_fpl_data()
         self.train_ml_model(stats)
         market_data = self.fetch_odds()
@@ -93,10 +99,9 @@ class MezallaEnterprise:
             
             if ev > 0.05:
                 bet = np.round(self.bankroll * 0.02, 2)
-                # Tablo sütunlariyla birebir eslesme
                 log_data = {
                     "team_name": home_team,
-                    "model_version": "V5.3-PROD",
+                    "model_version": "V5.4-PROD",
                     "home_strength": int(team_row['team_strength'].iloc[0]),
                     "avg_xg_snapshot": float(team_row['avg_xg'].iloc[0]),
                     "avg_threat_snapshot": float(team_row['avg_threat'].iloc[0]),
@@ -107,10 +112,11 @@ class MezallaEnterprise:
                 self.send_telegram(home_team, prob_home, best_odds, ev, bet)
 
     def send_telegram(self, team, prob, odds, ev, bet):
-        msg = (f"📈 *Mezalla ML Enterprise*\n\n"
+        msg = (f"🛡️ *Mezalla Enterprise v5.4*\n\n"
                f"⚽ Takim: {team}\n"
                f"🎯 ML Olasilik: %{prob*100:.1f}\n"
                f"💰 Oran: {odds:.2f}\n"
+               f"📈 Değer (EV): %{ev*100:.1f}\n"
                f"💵 Onerilen: {bet} TL")
         requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
                       json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "Markdown"})
