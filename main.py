@@ -10,7 +10,6 @@ from sklearn.calibration import CalibratedClassifierCV
 
 class MezallaEngine:
     def __init__(self):
-        # GitHub Secrets - Strip metodu ile gorunmez karakterler temizlenir
         self.sb_url = os.getenv('SB_URL', "").strip().rstrip("/")
         self.sb_key = os.getenv('SB_KEY', "").strip()
         self.tg_token = os.getenv('TG_TOKEN', "").strip()
@@ -35,23 +34,21 @@ class MezallaEngine:
         ]
 
     def fetch_market_odds(self):
-        """RapidAPI uzerinden oranlari ceker ve 403 hatasini analiz eder."""
-        print(f"[{datetime.now().strftime('%H:%M')}] Piyasa oranlari çekiliyor...")
+        print(f"[{datetime.now().strftime('%H:%M')}] Piyasa oranlari cekiliyor...")
         
         if not self.rapid_api_key:
-            print("HATA: ODDS_API_KEY bulunamadi. GitHub Secrets kontrol edilmeli.")
+            print("HATA: ODDS_API_KEY bulunamadi.")
             return {}
 
-        # Debug: Anahtarin dogru yuklenip yuklenmedigini kontrol et
-        print(f"DEBUG: Kullanilan anahtar (ilk 5 karakter): {self.rapid_api_key[:5]}...")
-
-        url = "https://the-odds-api.p.rapidapi.com/v4/sports/soccer_england_premier_league/odds/"
+        url = "https://odds.p.rapidapi.com/v4/sports/soccer_england_premier_league/odds"
+        
         headers = {
             "X-RapidAPI-Key": self.rapid_api_key,
-            "X-RapidAPI-Host": "the-odds-api.p.rapidapi.com"
+            "X-RapidAPI-Host": "odds.p.rapidapi.com"
         }
+        
         params = {
-            'regions': 'eu',
+            'regions': 'eu,us',
             'markets': 'player_anytime_goalscorer',
             'oddsFormat': 'decimal'
         }
@@ -66,8 +63,7 @@ class MezallaEngine:
             market_map = {}
             for match in data:
                 for bookie in match.get('bookmakers', []):
-                    # Pinnacle, Betfair ve WilliamHill en rasyonel verileri saglar
-                    if bookie['key'] in ['pinnacle', 'betfair_ex_back', 'williamhill', 'betfair_ex_lay']:
+                    if bookie['key'] in ['pinnacle', 'betfair_ex_back', 'williamhill', 'fanduel', 'draftkings', 'betmgm', 'bovada']:
                         for market in bookie.get('markets', []):
                             if market['key'] == 'player_anytime_goalscorer':
                                 for outcome in market['outcomes']:
@@ -76,7 +72,7 @@ class MezallaEngine:
                                         market_map[outcome['name']] = outcome['price']
             return market_map
         except Exception as e:
-            print(f"RapidAPI Bağlanti Hatasi: {e}")
+            print(f"Baglanti Hatasi: {e}")
             return {}
 
     def send_notification(self, message):
@@ -145,7 +141,7 @@ class MezallaEngine:
     def run_forecast_cycle(self):
         market_odds = self.fetch_market_odds()
         if not market_odds:
-            print("Analiz yapilacak piyasa verisi bulunamadi.")
+            print("Analiz yapilacak piyasa verisi bulunamadi. Ucretsiz plan golcu marketini desteklemiyor olabilir.")
             return
 
         latest = self.df.groupby('player_id').tail(1).copy()
@@ -160,7 +156,7 @@ class MezallaEngine:
         signals['bet_amount'] = np.round(np.minimum(self.bankroll * 0.02, 25.0), 2)
         
         if not signals.empty:
-            msg = f"🚀 *Mezalla Otonom Rapor (GW: {self.current_round})*\n\n"
+            msg = f"Mezalla Otonom Rapor (GW: {self.current_round})\n\n"
             upsert_headers = self.sb_headers.copy()
             upsert_headers["Prefer"] = "resolution=merge-duplicates"
 
@@ -172,7 +168,7 @@ class MezallaEngine:
                     "status": "AUTO", "created_at": datetime.now().isoformat()
                 }
                 requests.post(f"{self.sb_url}/rest/v1/signals", headers=upsert_headers, json=payload, timeout=5)
-                msg += f"👤 *{row['player_name']}*\n🎯 Olasilik: %{row['final_prob']*100:.1f}\n📈 EV: {row['ev']:.2f}\n💰 Oran: {row['real_odds']:.2f}\n💵 Bahis: {row['bet_amount']} TL\n\n"
+                msg += f"Oyuncu: {row['player_name']}\nOlasilik: %{row['final_prob']*100:.1f}\nEV: {row['ev']:.2f}\nOran: {row['real_odds']:.2f}\nBahis: {row['bet_amount']} TL\n\n"
             self.send_notification(msg)
         else:
             print("Kriterlere uygun firsat bulunamadi.")
