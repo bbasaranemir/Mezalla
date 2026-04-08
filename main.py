@@ -26,17 +26,12 @@ class MezallaEnterprise:
         self.model = None
 
     def fetch_fpl_data(self):
-        """FPL verilerini toplar ve string-sayi donusumlerini yapar."""
-        print(f"[{datetime.now().strftime('%H:%M')}] FPL verileri temizleniyor...")
         r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
-        
         df_players = pd.DataFrame(r['elements'])
         df_teams = pd.DataFrame(r['teams'])[['id', 'name', 'strength']]
         df_teams.columns = ['team_id', 'team_name', 'team_strength']
         
-        # KRITIK HATA COZUMU: Metin olarak gelen verileri sayiya ceviriyoruz
-        cols_to_fix = ['expected_goals', 'threat']
-        for col in cols_to_fix:
+        for col in ['expected_goals', 'threat']:
             df_players[col] = pd.to_numeric(df_players[col], errors='coerce').fillna(0)
         
         team_agg = df_players.groupby('team').agg({
@@ -48,19 +43,17 @@ class MezallaEnterprise:
         return pd.merge(team_agg, df_teams, on='team_id')
 
     def train_ml_model(self, stats):
-        print(f"[{datetime.now().strftime('%H:%M')}] Hibrit ML modeli egitiliyor...")
         X = stats[self.features]
         y = (X['avg_xg'] > X['avg_xg'].median()).astype(int)
-        
         ensemble = VotingClassifier(estimators=[
             ('xgb', XGBClassifier(n_estimators=100, max_depth=4, learning_rate=0.05)),
             ('rf', RandomForestClassifier(n_estimators=100, max_depth=5))
         ], voting='soft')
-        
         self.model = CalibratedClassifierCV(ensemble, cv=3)
         self.model.fit(X, y)
 
     def log_prediction(self, data):
+        """Yeni sütunlarla beraber DB kaydi."""
         try:
             url = f"{self.sb_url}/rest/v1/predictions"
             requests.post(url, headers=self.headers, json=data, timeout=10)
@@ -75,7 +68,7 @@ class MezallaEnterprise:
         return res.json() if res.status_code == 200 else []
 
     def run_engine(self):
-        print(f"[{datetime.now().strftime('%H:%M')}] Mezalla Otonom Dongu Basladi...")
+        print(f"[{datetime.now().strftime('%H:%M')}] Mezalla V5.5 Baslatildi...")
         stats = self.fetch_fpl_data()
         self.train_ml_model(stats)
         market_data = self.fetch_odds()
@@ -98,26 +91,31 @@ class MezallaEnterprise:
             ev = (prob_home * best_odds) - 1
             
             if ev > 0.05:
+                # Bahis miktari dinamik olarak hesaplanir
                 bet = np.round(self.bankroll * 0.02, 2)
+                
                 log_data = {
                     "team_name": home_team,
-                    "model_version": "V5.4-PROD",
+                    "model_version": "V5.5-FULL-LOG",
                     "home_strength": int(team_row['team_strength'].iloc[0]),
                     "avg_xg_snapshot": float(team_row['avg_xg'].iloc[0]),
                     "avg_threat_snapshot": float(team_row['avg_threat'].iloc[0]),
                     "prob_home": float(prob_home),
-                    "ev_value": float(ev)
+                    "ev_value": float(ev),
+                    "placed_odds": float(best_odds),
+                    "bet_amount": float(bet)
                 }
+                
                 self.log_prediction(log_data)
                 self.send_telegram(home_team, prob_home, best_odds, ev, bet)
 
     def send_telegram(self, team, prob, odds, ev, bet):
-        msg = (f"🛡️ *Mezalla Enterprise v5.4*\n\n"
+        msg = (f"🔍 *Mezalla Enterprise v5.5*\n\n"
                f"⚽ Takim: {team}\n"
                f"🎯 ML Olasilik: %{prob*100:.1f}\n"
                f"💰 Oran: {odds:.2f}\n"
-               f"📈 Değer (EV): %{ev*100:.1f}\n"
-               f"💵 Onerilen: {bet} TL")
+               f"💵 Bahis: {bet} TL\n"
+               f"📈 EV: %{ev*100:.1f}")
         requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
                       json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "Markdown"})
 
