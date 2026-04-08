@@ -10,8 +10,9 @@ from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.calibration import CalibratedClassifierCV
 
-class RegistaIntelligence:
+class MezallaEngine:
     def __init__(self):
+        # GitHub Secrets / Environment Variables
         self.sb_url = os.getenv('SB_URL', "").strip().rstrip("/")
         self.sb_key = os.getenv('SB_KEY', "")
         self.tg_token = os.getenv('TG_TOKEN', "")
@@ -24,7 +25,6 @@ class RegistaIntelligence:
         }
         
         self.bankroll = 585.60
-        self.confidence_multiplier = 1.0
         self.current_round = None
         self.next_kickoff = None
         self.model = None
@@ -36,6 +36,7 @@ class RegistaIntelligence:
         ]
 
     def send_notification(self, message):
+        """Telegram uzerinden Mezalla raporunu iletir."""
         if not self.tg_token or not self.tg_chat_id:
             return
         url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
@@ -46,11 +47,12 @@ class RegistaIntelligence:
             print(f"Bildirim hatasi: {e}")
 
     def fetch_and_process(self, limit=400):
-        print(f"[{datetime.now().strftime('%H:%M')}] Veri toplama ve hafta tespiti basladi...")
+        """FPL verilerini ceker ve Mezalla mimarisine gore isler."""
+        print(f"[{datetime.now().strftime('%H:%M')}] Veri toplama basladi...")
         try:
             static_data = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
             
-            # Guncel hafta ve kickoff zamani tespiti
+            # Guncel hafta ve kickoff zamani tespiti (Upsert anahtarlari)
             next_event = next(e for e in static_data['events'] if e['is_next'])
             self.current_round = next_event['id']
             self.next_kickoff = next_event['deadline_time']
@@ -79,6 +81,7 @@ class RegistaIntelligence:
             print(f"Veri isleme hatasi: {e}")
 
     def _feature_engine(self):
+        """Teknik indikatorlerin hesaplanmasi."""
         self.df['avg_mins'] = self.df.groupby('player_id')['minutes'].transform(lambda x: x.rolling(5, min_periods=1).mean())
         self.df['fatigue_index'] = self.df.groupby('player_id')['minutes'].transform(lambda x: x.rolling(2).sum())
         self.df['is_specialist'] = (self.df['threat'] > self.df['threat'].quantile(0.9)).astype(int)
@@ -92,6 +95,7 @@ class RegistaIntelligence:
         self.df = self.df.dropna(subset=['target', 'next_difficulty'])
 
     def train_ensemble(self):
+        """Hibrit model egitimi."""
         X, y = self.df[self.features], self.df['target']
         ensemble = VotingClassifier(estimators=[
             ('xgb', XGBClassifier(n_estimators=100, learning_rate=0.05, max_depth=4, eval_metric='logloss')),
@@ -101,6 +105,7 @@ class RegistaIntelligence:
         self.model.fit(X, y)
 
     def run_forecast_cycle(self, market_odds):
+        """Tahmin dongusu ve Upsert islemi."""
         latest = self.df.groupby('player_id').tail(1).copy()
         latest['raw_prob'] = self.model.predict_proba(latest[self.features])[:, 1]
         latest['final_prob'] = latest['raw_prob'] * (0.8 + 0.2 * (latest['avg_mins']/90))
@@ -112,9 +117,9 @@ class RegistaIntelligence:
         signals['bet_amount'] = np.round(np.minimum(self.bankroll * 0.02, 25.0), 2)
         
         if not signals.empty:
-            msg = f"🔔 *Regista Intelligence Raporu (GW: {self.current_round})*\n\n"
+            msg = f"🔔 *Mezalla Raporu (GW: {self.current_round})*\n\n"
             
-            # Upsert Header Yapilandirmasi
+            # Upsert Header (Mukerrer kayit engelleme)
             upsert_headers = self.headers.copy()
             upsert_headers["Prefer"] = "resolution=merge-duplicates"
 
@@ -139,11 +144,11 @@ class RegistaIntelligence:
         return signals
 
 if __name__ == "__main__":
-    engine = RegistaIntelligence()
+    engine = MezallaEngine()
     engine.fetch_and_process()
     engine.train_ensemble()
     
-    # Ornek Piyasa Verisi
+    # Piyasa Verisi (Dinamik cekilebilir)
     market = {
         'Anthony Gordon': 3.40,
         'Danny Welbeck': 3.25,
