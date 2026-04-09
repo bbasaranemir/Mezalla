@@ -43,7 +43,9 @@ class MezallaEnterprise:
         url = f"{self.sb_url}/rest/v1/predictions?actual_result=eq.PENDING"
         try:
             pending = requests.get(url, headers=self.headers, timeout=10).json()
-            if not pending: return
+            if not pending: 
+                print("Bekleyen PENDING tahmini bulunamadi.")
+                return
 
             fixtures = requests.get("https://fantasy.premierleague.com/api/fixtures/").json()
             f_results = {f['id']: f for f in fixtures if f['finished']}
@@ -64,7 +66,6 @@ class MezallaEnterprise:
                 pred_team_id = t_map.get(norm_team)
 
                 actual, pl = "LOSS", -bet
-                # Kazanma mantigi: Ev sahibi tahmini ve galibiyeti VEYA Deplasman tahmini ve galibiyeti
                 if (match['team_h'] == pred_team_id and h_score > a_score) or \
                    (match['team_a'] == pred_team_id and a_score > h_score):
                     actual, pl = "WIN", round((bet * odds) - bet, 2)
@@ -73,12 +74,11 @@ class MezallaEnterprise:
 
                 requests.patch(f"{self.sb_url}/rest/v1/predictions?id=eq.{p_id}", 
                                headers=self.headers, json={"actual_result": actual, "profit_loss": pl})
-                print(f"Audit: {pred_team} -> {actual}")
+                print(f"✅ Audit: {pred_team} -> {actual}")
         except Exception as e:
             print(f"Audit Hatasi: {e}")
 
     def fetch_team_stats(self):
-        """FPL verilerini diferansiyel analiz icin hazirlar."""
         r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
         df_players = pd.DataFrame(r['elements'])
         df_teams = pd.DataFrame(r['teams'])[['id', 'name', 'strength']]
@@ -122,12 +122,8 @@ class MezallaEnterprise:
 
             h_s, a_s = h_row.iloc[0], a_row.iloc[0]
             
-            # Diferansiyel Analiz
-            s_diff = h_s['strength'] - a_s['strength']
-            x_diff = h_s['expected_goals'] - a_s['expected_goals']
-            
-            # Olasilik ve EV Hesabi (Rasyonel Limitler)
-            prob = np.clip(0.38 + (s_diff * 0.05) + (x_diff * 0.15), 0.15, 0.80)
+            # Diferansiyel Analiz ve Olasilik (Rasyonel Limitler)
+            prob = np.clip(0.38 + ((h_s['strength'] - a_s['strength']) * 0.05) + ((h_s['expected_goals'] - a_s['expected_goals']) * 0.15), 0.15, 0.80)
             
             best_odds = 0
             for b in match['bookmakers']:
@@ -141,12 +137,18 @@ class MezallaEnterprise:
 
             if 0.04 < ev < 0.45:
                 # Tekillik Kontrolu
-                check = requests.get(f"{self.sb_url}/rest/v1/predictions?fixture_id=eq.{f_info['fixture_id']}&team_name=eq.{norm_h}", headers=self.headers).json()
-                if check: continue
+                try:
+                    check = requests.get(f"{self.sb_url}/rest/v1/predictions?fixture_id=eq.{f_info['fixture_id']}&team_name=eq.{norm_h}", headers=self.headers, timeout=10).json()
+                    if check: 
+                        print(f"⏩ {norm_h} (ID: {f_info['fixture_id']}) zaten kayitli, atlaniliyor.")
+                        continue
+                exceptException as e:
+                    print(f"DB Kontrol Hatasi (Atlaniliyor): {e}")
+                    continue
 
                 bet = round(self.bankroll * 0.02, 2)
                 payload = {
-                    "fixture_id": f_info['fixture_id'], "team_name": norm_h, "model_version": "V6.1-PROD",
+                    "fixture_id": f_info['fixture_id'], "team_name": norm_h, "model_version": "V6.2-PROD",
                     "prob_home": float(prob), "ev_value": float(ev), "placed_odds": float(best_odds),
                     "bet_amount": float(bet), "avg_xg_snapshot": float(h_s['expected_goals'])
                 }
@@ -154,13 +156,41 @@ class MezallaEnterprise:
                 self.send_telegram(norm_h, norm_a, prob, best_odds, ev, bet)
 
     def send_telegram(self, h, a, p, o, ev, b):
-        msg = (f"🛡️ *Mezalla Enterprise v6.1*\n\n🏟️ Mac: {h} vs {a}\n🎯 Tahmin: {h}\n"
+        msg = (f"🛡️ *Mezalla Enterprise v6.2*\n\n🏟️ Mac: {h} vs {a}\n🎯 Tahmin: {h}\n"
                f"📊 Olasilik: %{p*100:.1f}\n💰 Oran: {o:.2f}\n📈 EV: %{ev*100:.1f}\n💵 Bahis: {b} TL")
         requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
                       json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "Markdown"})
 
+# --- MAIN EXECUTION BLOCK (MODIFIED FOR HEALTH CHECK) ---
 if __name__ == "__main__":
+    print(f"[{datetime.now().strftime('%H:%M')}] Sistem tetiklendi.")
     engine = MezallaEnterprise()
-    engine.audit_past_predictions() # Gecmisi temizle
+    
+    # --- HEALTH CHECK (HEARTBEAT) ENTEGRASYONU ---
+    # Kodun calistigini teyit etmek icin Telegram'a 'canliyim' mesaji atar.
+    try:
+        # Markdown formatinda nice bir mesaj
+        requests.post(
+            f"https://api.telegram.org/bot{engine.tg_token}/sendMessage",
+            json={
+                "chat_id": engine.tg_chat_id,
+                "text": f"🤖 *Mezalla Enterprise V6.2* Aktif.\nDenetim ve Tarama döngüsü başlatılıyor...",
+                "parse_mode": "Markdown"
+            },
+            timeout=10 # Isletim sistemini yavaslatmamasi icin timeout ekledik
+        )
+        print(f"[{datetime.now().strftime('%H:%M')}] Telegram Canlilik mesaji gonderildi.")
+    except Exception as e:
+        print(f"Health Check Mesaj Hatasi (Sistem devam ediyor): {e}")
+    # ---------------------------------------------
+
+    # 1. Once dünün hesabını kapat.
+    engine.audit_past_predictions() 
+    
+    # 2. Guncel veriyi cek ve temizle
     stats_data = engine.fetch_team_stats()
-    engine.run_prediction_cycle(stats_data) # Gelecegi planla
+    
+    # 3. Tahmin yap ve yeni kayitlari ac
+    engine.run_prediction_cycle(stats_data) 
+    
+    print(f"[{datetime.now().strftime('%H:%M')}] İşlem tamamlandı.")
